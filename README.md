@@ -5,9 +5,16 @@ Use DualSense `CREATE` button to trigger Windows capture actions.
 ## Behavior
 
 - Single click `CREATE` -> `Win + Alt + PrintScreen`
-- Double click `CREATE` -> `Win + G`
+- Double click `CREATE` -> `Win + Alt + G`
 
 Double-click window is `300ms`.
+
+## Tray
+
+- Left click or right click tray icon opens menu.
+- Menu items:
+  - Pause/Resume
+  - Exit
 
 ## Build (Windows)
 
