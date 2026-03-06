@@ -32,6 +32,10 @@
 *.a
 *.lib
 
+# Keep vendored SDL3 binaries in repo
+!SDL3-3.4.2/lib/**/*.lib
+!SDL3-3.4.2/lib/**/*.dll
+
 # Executables
 *.exe
 *.out
