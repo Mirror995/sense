@@ -1,180 +1,223 @@
-﻿// sense.cpp : 定义应用程序的入口点。
-//
+﻿#define SDL_MAIN_HANDLED
 
-#include "framework.h"
-#include "sense.h"
+#include <Windows.h>
+#include <SDL3/SDL.h>
 
-#define MAX_LOADSTRING 100
+#include <array>
+#include <initializer_list>
 
-// 全局变量:
-HINSTANCE hInst;                                // 当前实例
-WCHAR szTitle[MAX_LOADSTRING];                  // 标题栏文本
-WCHAR szWindowClass[MAX_LOADSTRING];            // 主窗口类名
-
-// 此代码模块中包含的函数的前向声明:
-ATOM                MyRegisterClass(HINSTANCE hInstance);
-BOOL                InitInstance(HINSTANCE, int);
-LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
-INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
-
-int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
-                     _In_opt_ HINSTANCE hPrevInstance,
-                     _In_ LPWSTR    lpCmdLine,
-                     _In_ int       nCmdShow)
+namespace
 {
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
+constexpr Uint16 kSonyVendorId = 0x054C;
+constexpr ULONGLONG kDoubleClickWindowMs = 300;
 
-    // TODO: 在此处放置代码。
+SDL_Gamepad* gController = nullptr;
+SDL_JoystickID gControllerInstanceId = -1;
 
-    // 初始化全局字符串
-    LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-    LoadStringW(hInstance, IDC_SENSE, szWindowClass, MAX_LOADSTRING);
-    MyRegisterClass(hInstance);
+bool gSingleClickPending = false;
+ULONGLONG gSingleClickDeadline = 0;
+ULONGLONG gLastReleaseTime = 0;
 
-    // 执行应用程序初始化:
-    if (!InitInstance (hInstance, nCmdShow))
+void SendChord(const std::initializer_list<WORD> keys)
+{
+    std::array<INPUT, 16> inputs{};
+    const size_t keyCount = keys.size();
+    if (keyCount == 0 || keyCount * 2 > inputs.size())
     {
-        return FALSE;
+        return;
     }
 
-    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_SENSE));
-
-    MSG msg;
-
-    // 主消息循环:
-    while (GetMessage(&msg, nullptr, 0, 0))
+    size_t index = 0;
+    for (WORD key : keys)
     {
-        if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
+        inputs[index].type = INPUT_KEYBOARD;
+        inputs[index].ki.wVk = key;
+        ++index;
+    }
+    for (auto it = keys.end(); it != keys.begin();)
+    {
+        --it;
+        inputs[index].type = INPUT_KEYBOARD;
+        inputs[index].ki.wVk = *it;
+        inputs[index].ki.dwFlags = KEYEVENTF_KEYUP;
+        ++index;
+    }
+
+    SendInput(static_cast<UINT>(index), inputs.data(), sizeof(INPUT));
+}
+
+void TriggerSingleClickAction()
+{
+    // Win + Alt + PrintScreen
+    SendChord({ VK_LWIN, VK_MENU, VK_SNAPSHOT });
+}
+
+void TriggerDoubleClickAction()
+{
+    // Win + G
+    SendChord({ VK_LWIN, 'G' });
+}
+
+bool IsDualSenseDevice(SDL_JoystickID instanceId)
+{
+    return SDL_IsGamepad(instanceId) &&
+           SDL_GetGamepadVendorForID(instanceId) == kSonyVendorId;
+}
+
+void CloseController()
+{
+    if (gController != nullptr)
+    {
+        SDL_CloseGamepad(gController);
+        gController = nullptr;
+        gControllerInstanceId = -1;
+    }
+}
+
+void TryOpenFirstDualSense()
+{
+    if (gController != nullptr)
+    {
+        return;
+    }
+
+    int count = 0;
+    SDL_JoystickID* gamepads = SDL_GetGamepads(&count);
+    if (gamepads == nullptr)
+    {
+        return;
+    }
+
+    for (int i = 0; i < count; ++i)
+    {
+        const SDL_JoystickID instanceId = gamepads[i];
+        if (!IsDualSenseDevice(instanceId))
         {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
+            continue;
         }
+
+        SDL_Gamepad* opened = SDL_OpenGamepad(instanceId);
+        if (opened == nullptr)
+        {
+            continue;
+        }
+
+        gController = opened;
+        gControllerInstanceId = SDL_GetGamepadID(gController);
+        SDL_free(gamepads);
+        return;
     }
 
-    return (int) msg.wParam;
+    SDL_free(gamepads);
 }
 
-
-
-//
-//  函数: MyRegisterClass()
-//
-//  目标: 注册窗口类。
-//
-ATOM MyRegisterClass(HINSTANCE hInstance)
+bool IsCreateButton(SDL_GamepadButton button)
 {
-    WNDCLASSEXW wcex;
-
-    wcex.cbSize = sizeof(WNDCLASSEX);
-
-    wcex.style          = CS_HREDRAW | CS_VREDRAW;
-    wcex.lpfnWndProc    = WndProc;
-    wcex.cbClsExtra     = 0;
-    wcex.cbWndExtra     = 0;
-    wcex.hInstance      = hInstance;
-    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_SENSE));
-    wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
-    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_SENSE);
-    wcex.lpszClassName  = szWindowClass;
-    wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
-
-    return RegisterClassExW(&wcex);
+    // 在 SDL 的映射里，DualSense 的 Create 常见为 BACK，部分映射会给到 MISC1。
+    return button == SDL_GAMEPAD_BUTTON_BACK ||
+           button == SDL_GAMEPAD_BUTTON_MISC1;
 }
 
-//
-//   函数: InitInstance(HINSTANCE, int)
-//
-//   目标: 保存实例句柄并创建主窗口
-//
-//   注释:
-//
-//        在此函数中，我们在全局变量中保存实例句柄并
-//        创建和显示主程序窗口。
-//
-BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
+void HandleCreateButtonUp()
 {
-   hInst = hInstance; // 将实例句柄存储在全局变量中
-
-   HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-      CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
-
-   if (!hWnd)
-   {
-      return FALSE;
-   }
-
-   ShowWindow(hWnd, nCmdShow);
-   UpdateWindow(hWnd);
-
-   return TRUE;
-}
-
-//
-//  函数: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  目标: 处理主窗口的消息。
-//
-//  WM_COMMAND  - 处理应用程序菜单
-//  WM_PAINT    - 绘制主窗口
-//  WM_DESTROY  - 发送退出消息并返回
-//
-//
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    switch (message)
+    const ULONGLONG now = GetTickCount64();
+    if (gSingleClickPending && (now - gLastReleaseTime) <= kDoubleClickWindowMs)
     {
-    case WM_COMMAND:
+        gSingleClickPending = false;
+        TriggerDoubleClickAction();
+    }
+    else
+    {
+        gSingleClickPending = true;
+        gSingleClickDeadline = now + kDoubleClickWindowMs;
+    }
+
+    gLastReleaseTime = now;
+}
+
+void FlushPendingSingleClick()
+{
+    if (!gSingleClickPending)
+    {
+        return;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    if (now >= gSingleClickDeadline)
+    {
+        gSingleClickPending = false;
+        TriggerSingleClickAction();
+    }
+}
+} // namespace
+
+int APIENTRY wWinMain(
+    _In_ HINSTANCE /*hInstance*/,
+    _In_opt_ HINSTANCE /*hPrevInstance*/,
+    _In_ LPWSTR /*lpCmdLine*/,
+    _In_ int /*nCmdShow*/)
+{
+    if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_EVENTS))
+    {
+        return 1;
+    }
+
+    TryOpenFirstDualSense();
+
+    bool running = true;
+    while (running)
+    {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
         {
-            int wmId = LOWORD(wParam);
-            // 分析菜单选择:
-            switch (wmId)
+            if (msg.message == WM_QUIT)
             {
-            case IDM_ABOUT:
-                DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
+                running = false;
                 break;
-            case IDM_EXIT:
-                DestroyWindow(hWnd);
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        SDL_Event event;
+        while (SDL_PollEvent(&event))
+        {
+            switch (event.type)
+            {
+            case SDL_EVENT_QUIT:
+                running = false;
+                break;
+            case SDL_EVENT_GAMEPAD_ADDED:
+                if (gController == nullptr && IsDualSenseDevice(event.gdevice.which))
+                {
+                    TryOpenFirstDualSense();
+                }
+                break;
+            case SDL_EVENT_GAMEPAD_REMOVED:
+                if (event.gdevice.which == gControllerInstanceId)
+                {
+                    CloseController();
+                    gSingleClickPending = false;
+                    TryOpenFirstDualSense();
+                }
+                break;
+            case SDL_EVENT_GAMEPAD_BUTTON_UP:
+                if (event.gbutton.which == gControllerInstanceId &&
+                    IsCreateButton(static_cast<SDL_GamepadButton>(event.gbutton.button)))
+                {
+                    HandleCreateButtonUp();
+                }
                 break;
             default:
-                return DefWindowProc(hWnd, message, wParam, lParam);
+                break;
             }
         }
-        break;
-    case WM_PAINT:
-        {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: 在此处添加使用 hdc 的任何绘图代码...
-            EndPaint(hWnd, &ps);
-        }
-        break;
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        break;
-    default:
-        return DefWindowProc(hWnd, message, wParam, lParam);
+
+        FlushPendingSingleClick();
+        SDL_Delay(5);
     }
+
+    CloseController();
+    SDL_Quit();
     return 0;
-}
-
-// “关于”框的消息处理程序。
-INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    UNREFERENCED_PARAMETER(lParam);
-    switch (message)
-    {
-    case WM_INITDIALOG:
-        return (INT_PTR)TRUE;
-
-    case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
-        {
-            EndDialog(hDlg, LOWORD(wParam));
-            return (INT_PTR)TRUE;
-        }
-        break;
-    }
-    return (INT_PTR)FALSE;
 }
