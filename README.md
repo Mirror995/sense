@@ -17,12 +17,12 @@ This project is already configured for local folder `SDL3-3.4.2` in the repo roo
    - `sense/`
    - `SDL3-3.4.2/`
 2. Open `sense.slnx` with Visual Studio 2022.
-3. Build `x64` (or `Win32`) Debug/Release.
+3. Build `x64` Debug/Release.
 
 Project uses:
 
 - Include: `..\SDL3-3.4.2\include`
-- Lib: `..\SDL3-3.4.2\lib\x64` or `..\SDL3-3.4.2\lib\x86`
+- Lib: `..\SDL3-3.4.2\lib\x64`
 - Dependency: `SDL3.lib`
 
 ## Run (Windows)

@@ -1,7 +1,6 @@
 <Solution>
   <Configurations>
     <Platform Name="x64" />
-    <Platform Name="x86" />
   </Configurations>
   <Project Path="sense/sense.vcxproj" />
 </Solution>
