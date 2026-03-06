@@ -123,7 +123,7 @@ void TryOpenFirstDualSense()
 
 bool IsCreateButton(SDL_GamepadButton button)
 {
-    // 在 SDL 的映射里，DualSense 的 Create 常见为 BACK，部分映射会给到 MISC1。
+    // In SDL mappings, DualSense Create is commonly BACK, sometimes MISC1.
     return button == SDL_GAMEPAD_BUTTON_BACK ||
            button == SDL_GAMEPAD_BUTTON_MISC1;
 }
@@ -177,9 +177,9 @@ void ShowTrayMenu(HWND hwnd)
         return;
     }
 
-    AppendMenuW(menu, MF_STRING, kMenuTogglePauseId, gPaused ? L"恢复" : L"暂停");
+    AppendMenuW(menu, MF_STRING, kMenuTogglePauseId, gPaused ? L"Resume" : L"Pause");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuExitId, L"退出");
+    AppendMenuW(menu, MF_STRING, kMenuExitId, L"Exit");
 
     POINT cursor{};
     GetCursorPos(&cursor);
