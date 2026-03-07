@@ -1,11 +1,16 @@
 #define SDL_MAIN_HANDLED
 
 #include <Windows.h>
+#include <knownfolders.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <SDL3/SDL.h>
 
 #include <array>
+#include <filesystem>
 #include <initializer_list>
+#include <string>
+#include <unordered_set>
 
 namespace
 {
@@ -16,13 +21,25 @@ constexpr UINT kMenuTogglePauseId = 1001;
 constexpr UINT kMenuExitId = 1002;
 constexpr UINT kTrayIconId = 1;
 constexpr wchar_t kWindowClassName[] = L"sense.tray.window";
+constexpr int kDeleteRetryCount = 20;
+constexpr DWORD kDeleteRetryDelayMs = 50;
+
+struct CaptureSnapshot
+{
+    bool valid = false;
+    std::filesystem::path directory;
+    size_t fileCount = 0;
+    std::unordered_set<std::wstring> files;
+};
 
 SDL_Gamepad* gController = nullptr;
 SDL_JoystickID gControllerInstanceId = -1;
+bool gCreateButtonHeld = false;
 
-bool gSingleClickPending = false;
-ULONGLONG gSingleClickDeadline = 0;
-ULONGLONG gLastReleaseTime = 0;
+bool gAwaitingSecondClick = false;
+ULONGLONG gLastClickTime = 0;
+CaptureSnapshot gFirstClickSnapshot{};
+
 bool gPaused = false;
 
 NOTIFYICONDATAW gTrayIconData{};
@@ -58,14 +75,176 @@ void SendChord(const std::initializer_list<WORD> keys)
 
 void TriggerSingleClickAction()
 {
-    // Win + Alt + PrintScreen
     SendChord({ VK_LWIN, VK_MENU, VK_SNAPSHOT });
 }
 
 void TriggerDoubleClickAction()
 {
-    // Win + Alt + G
     SendChord({ VK_LWIN, VK_MENU, 'G' });
+}
+
+std::filesystem::path GetCapturesDirectory()
+{
+    PWSTR videosPath = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_Videos, 0, nullptr, &videosPath)))
+    {
+        return {};
+    }
+
+    std::filesystem::path captures(videosPath);
+    CoTaskMemFree(videosPath);
+    captures /= L"Captures";
+    return captures;
+}
+
+bool IsScreenshotFile(const std::filesystem::path& path)
+{
+    const std::wstring ext = path.extension().wstring();
+    return _wcsicmp(ext.c_str(), L".png") == 0;
+}
+
+CaptureSnapshot TakeCaptureSnapshot()
+{
+    CaptureSnapshot snapshot{};
+    snapshot.directory = GetCapturesDirectory();
+    if (snapshot.directory.empty())
+    {
+        return snapshot;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(snapshot.directory, ec) ||
+        !std::filesystem::is_directory(snapshot.directory, ec))
+    {
+        return snapshot;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(snapshot.directory, ec))
+    {
+        if (ec || !entry.is_regular_file(ec))
+        {
+            continue;
+        }
+        if (!IsScreenshotFile(entry.path()))
+        {
+            continue;
+        }
+
+        snapshot.files.insert(entry.path().filename().wstring());
+    }
+
+    snapshot.fileCount = snapshot.files.size();
+    snapshot.valid = true;
+    return snapshot;
+}
+
+bool DeleteScreenshotFromFirstClick(const CaptureSnapshot& before)
+{
+    if (!before.valid)
+    {
+        return false;
+    }
+
+    for (int attempt = 0; attempt < kDeleteRetryCount; ++attempt)
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(before.directory, ec))
+        {
+            return false;
+        }
+
+        std::filesystem::path newestPath;
+        std::filesystem::file_time_type newestTime{};
+        bool found = false;
+        size_t currentCount = 0;
+
+        for (const auto& entry : std::filesystem::directory_iterator(before.directory, ec))
+        {
+            if (ec || !entry.is_regular_file(ec))
+            {
+                continue;
+            }
+            if (!IsScreenshotFile(entry.path()))
+            {
+                continue;
+            }
+
+            ++currentCount;
+            const std::wstring name = entry.path().filename().wstring();
+            if (before.files.contains(name))
+            {
+                continue;
+            }
+
+            const auto writeTime = entry.last_write_time(ec);
+            if (ec)
+            {
+                continue;
+            }
+            if (!found || writeTime > newestTime)
+            {
+                newestTime = writeTime;
+                newestPath = entry.path();
+                found = true;
+            }
+        }
+
+        if (found)
+        {
+            std::error_code removeEc;
+            return std::filesystem::remove(newestPath, removeEc) && !removeEc;
+        }
+
+        if (currentCount > before.fileCount)
+        {
+            return false;
+        }
+
+        Sleep(kDeleteRetryDelayMs);
+    }
+
+    return false;
+}
+
+void ResetClickState()
+{
+    gCreateButtonHeld = false;
+    gAwaitingSecondClick = false;
+    gLastClickTime = 0;
+    gFirstClickSnapshot = {};
+}
+
+void HandleCreateButtonDown()
+{
+    const ULONGLONG now = GetTickCount64();
+    if (gAwaitingSecondClick && (now - gLastClickTime) <= kDoubleClickWindowMs)
+    {
+        gAwaitingSecondClick = false;
+        TriggerDoubleClickAction();
+        DeleteScreenshotFromFirstClick(gFirstClickSnapshot);
+    }
+    else
+    {
+        gFirstClickSnapshot = TakeCaptureSnapshot();
+        TriggerSingleClickAction();
+        gAwaitingSecondClick = true;
+    }
+
+    gLastClickTime = now;
+}
+
+void ClearExpiredSecondClickWindow()
+{
+    if (!gAwaitingSecondClick)
+    {
+        return;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    if ((now - gLastClickTime) > kDoubleClickWindowMs)
+    {
+        gAwaitingSecondClick = false;
+    }
 }
 
 bool IsDualSenseDevice(SDL_JoystickID instanceId)
@@ -123,41 +302,8 @@ void TryOpenFirstDualSense()
 
 bool IsCreateButton(SDL_GamepadButton button)
 {
-    // In SDL mappings, DualSense Create is commonly BACK, sometimes MISC1.
     return button == SDL_GAMEPAD_BUTTON_BACK ||
            button == SDL_GAMEPAD_BUTTON_MISC1;
-}
-
-void HandleCreateButtonUp()
-{
-    const ULONGLONG now = GetTickCount64();
-    if (gSingleClickPending && (now - gLastReleaseTime) <= kDoubleClickWindowMs)
-    {
-        gSingleClickPending = false;
-        TriggerDoubleClickAction();
-    }
-    else
-    {
-        gSingleClickPending = true;
-        gSingleClickDeadline = now + kDoubleClickWindowMs;
-    }
-
-    gLastReleaseTime = now;
-}
-
-void FlushPendingSingleClick()
-{
-    if (!gSingleClickPending)
-    {
-        return;
-    }
-
-    const ULONGLONG now = GetTickCount64();
-    if (now >= gSingleClickDeadline)
-    {
-        gSingleClickPending = false;
-        TriggerSingleClickAction();
-    }
 }
 
 void DestroyTrayIcon()
@@ -198,7 +344,7 @@ void ShowTrayMenu(HWND hwnd)
         gPaused = !gPaused;
         if (gPaused)
         {
-            gSingleClickPending = false;
+            ResetClickState();
         }
     }
     else if (selected == kMenuExitId)
@@ -337,16 +483,25 @@ int APIENTRY wWinMain(
                 if (event.gdevice.which == gControllerInstanceId)
                 {
                     CloseController();
-                    gSingleClickPending = false;
+                    ResetClickState();
                     TryOpenFirstDualSense();
                 }
                 break;
-            case SDL_EVENT_GAMEPAD_BUTTON_UP:
+            case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
                 if (!gPaused &&
                     event.gbutton.which == gControllerInstanceId &&
+                    IsCreateButton(static_cast<SDL_GamepadButton>(event.gbutton.button)) &&
+                    !gCreateButtonHeld)
+                {
+                    gCreateButtonHeld = true;
+                    HandleCreateButtonDown();
+                }
+                break;
+            case SDL_EVENT_GAMEPAD_BUTTON_UP:
+                if (event.gbutton.which == gControllerInstanceId &&
                     IsCreateButton(static_cast<SDL_GamepadButton>(event.gbutton.button)))
                 {
-                    HandleCreateButtonUp();
+                    gCreateButtonHeld = false;
                 }
                 break;
             default:
@@ -356,7 +511,7 @@ int APIENTRY wWinMain(
 
         if (!gPaused)
         {
-            FlushPendingSingleClick();
+            ClearExpiredSecondClickWindow();
         }
         SDL_Delay(5);
     }
